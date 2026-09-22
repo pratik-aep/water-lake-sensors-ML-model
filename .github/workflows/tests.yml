@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          # CPU-only PyTorch first: the default Linux wheel bundles GPU libraries the tests never use.
+          pip install torch==$(grep '^torch==' requirements.txt | cut -d= -f3) --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest models -q -p no:warnings

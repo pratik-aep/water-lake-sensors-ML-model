@@ -1,0 +1,18 @@
+{
+  "_about": "How the Udaipur vendor's lake export maps onto the models. Column names on the left are ours; on the right, the export's. Replace the right-hand names once a real export is available. Units follow the vendor spec: oxygen and turbidity are 0-100%.",
+  "columns": {
+    "station_id": "station_id",
+    "timestamp": "timestamp",
+    "temperature": "temperature",
+    "ph": "ph",
+    "turbidity": "turbidity",
+    "dissolved_oxygen": "dissolved_oxygen"
+  },
+  "stations": {},
+  "units": {"dissolved_oxygen": "percent", "turbidity": "percent"},
+  "_turbidity_percent_to_ntu": "Set to [slope, intercept] after measuring a few water samples with a lab turbidimeter beside the sensor; until then turbidity stays on the vendor's % scale.",
+  "turbidity_percent_to_ntu": null,
+  "sensor_ranges": {"temperature": [-20, 70], "ph": [4, 9], "dissolved_oxygen": [null, 100]},
+  "pressure_atm": 0.93,
+  "timezone": null
+}

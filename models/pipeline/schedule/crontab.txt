@@ -1,0 +1,5 @@
+# Linux server: add with `crontab -e`. Replace /PATH/TO/h20_quality_detection; alert settings go in the environment.
+# Every morning at 06:30: take in new exports, refresh weather, report, dashboard, alerts.
+30 6 * * *  cd /PATH/TO/h20_quality_detection && .venv/bin/python -m models.pipeline.daily --notify >> models/pipeline/daily.log 2>&1
+# The 1st of each month at 02:00: retrain every model on all history gathered so far.
+0 2 1 * *  cd /PATH/TO/h20_quality_detection && .venv/bin/python -m models.pipeline.train_all --readings models/pipeline/history/readings.csv --weather models/pipeline/history/weather.csv --lab models/pipeline/history/lab_results.csv --vendor-mapping models/pipeline/vendor_mapping.json >> models/pipeline/retrain.log 2>&1

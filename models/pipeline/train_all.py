@@ -9,6 +9,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
+from ..air_quality import train as air_train
 from ..algal_bloom import train as algae_train
 from ..algal_bloom.config import TARGET as CHLOROPHYLL
 from ..anomaly_detection import train as anomaly_train
@@ -20,6 +21,7 @@ from ..coliform_nowcast.config import TARGET as COLIFORM
 from ..forecasting import train as forecast_train
 from ..forecasting.data import history_from_frame, load_weather, to_hourly
 from ..wqi import train as wqi_train
+from .ingest import load_mapping, normalise, turbidity_unit
 
 HERE = Path(__file__).parent
 MODEL_FILES = {
@@ -29,6 +31,7 @@ MODEL_FILES = {
     "wqi": "wqi_sensor.joblib",
     "algal_bloom": "chlorophyll_soft_sensor.joblib",
     "coliform_nowcast": "coliform_nowcast.joblib",
+    "air_quality": "air_forecaster.joblib",
 }
 
 
@@ -56,10 +59,14 @@ def _read_metrics(path: Path) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--readings", type=Path, default=HERE / "data" / "sensor_readings.csv", help="10-minute sensor export")
+    parser.add_argument("--vendor-mapping", type=Path,
+                        help="column names and units of a vendor export (see vendor_mapping.json); the daily run reuses it")
     parser.add_argument("--weather", type=Path, default=HERE / "data" / "weather.csv", help="hourly weather")
     parser.add_argument("--no-weather", action="store_true")
     parser.add_argument("--lab", type=Path, default=HERE / "data" / "lab_results.csv",
                         help="lab results: station_id, timestamp, bod, conductivity, nitrate (lab pH/turbidity/DO optional)")
+    parser.add_argument("--air-readings", type=Path, default=HERE / "data" / "air_readings.csv",
+                        help="air station readings (used if the file exists): station_id, timestamp, pm1..tsp, gases in ppm")
     parser.add_argument("--known-episodes", type=Path, default=HERE / "data" / "injected_episodes.csv",
                         help="known sensor faults and pollution events (e.g. the maintenance log), used if the file exists")
     parser.add_argument("--test-days", type=int, default=60, help="most recent days held out when testing each model")
@@ -73,6 +80,14 @@ def main(argv=None):
 
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
+    source = args.readings
+    mapping = load_mapping(args.vendor_mapping)
+    if args.vendor_mapping:
+        # Every model learns from the same normalised readings: our column names, oxygen in mg/L.
+        normalised, ingest_report = normalise(pd.read_csv(args.readings, low_memory=False), mapping)
+        args.readings = out / "normalised_readings.csv"
+        normalised.to_csv(args.readings, index=False)
+        print(f"Normalised the vendor export: {ingest_report}")
     use_weather = not args.no_weather and args.weather.exists()
     weather_args = ["--weather", str(args.weather)] if use_weather else ["--no-weather"]
     seed = ["--seed", str(args.seed)]
@@ -80,7 +95,8 @@ def main(argv=None):
     # Chlorophyll-a and total coliform are optional in a lab panel; without them their models are simply not trained.
     lab_columns = pd.read_csv(args.lab, nrows=1).columns
     has_chlorophyll, has_coliform = CHLOROPHYLL in lab_columns, COLIFORM in lab_columns
-    stages = 4 + has_chlorophyll + has_coliform
+    has_air = args.air_readings.exists()
+    stages = 4 + has_chlorophyll + has_coliform + has_air
 
     print(f"\n===== 1/{stages}  Anomaly detector =====")
     known = ["--known-episodes", str(args.known_episodes)] if args.known_episodes.exists() else []
@@ -118,6 +134,11 @@ def main(argv=None):
         coliform_train.main(["--data", str(cleaned), "--lab", str(args.lab), *weather_args,
                              "--out-dir", str(out / "coliform_nowcast"), *seed])
         trained.append("coliform_nowcast")
+    if has_air:
+        print(f"\n===== {len(trained) + 1}/{stages}  Air quality (AQI and particulate forecasts) =====")
+        air_train.main(["--data", str(args.air_readings), *(["--weather", str(args.weather)] if use_weather else []),
+                        "--test-days", str(args.test_days), "--out-dir", str(out / "air_quality"), *seed])
+        trained.append("air_quality")
 
     metrics = {name: _read_metrics(out / name / MODEL_FILES[name].replace(".joblib", "_metrics.json")) for name in trained}
     summary = {
@@ -138,10 +159,17 @@ def main(argv=None):
         coliform = metrics["coliform_nowcast"]
         summary["coliform_model"] = coliform.get("model")
         summary["coliform_cpcb_band_agreement"] = coliform.get("test", {}).get("cpcb_band_agreement_with_lab")
+    if has_air:
+        tomorrow = metrics["air_quality"].get("daily_test", {}).get("1", {})
+        summary["air_tomorrow_pm25_mae_ug_m3"] = tomorrow.get("pm25", {}).get("mae")
+        summary["air_tomorrow_category_agreement"] = tomorrow.get("category_agreement")
     manifest = {
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "readings": str(args.readings),
-        "readings_sha256": _sha256(args.readings),
+        "readings": str(source),
+        "readings_sha256": _sha256(source),
+        # The daily run applies the same mapping, so its readings arrive in the units the models learned.
+        "vendor_mapping": mapping,
+        "turbidity_unit": turbidity_unit(mapping),
         "weather": str(args.weather) if use_weather else None,
         "lab": str(args.lab),
         "lab_sha256": _sha256(args.lab),

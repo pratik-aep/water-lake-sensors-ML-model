@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Runs the daily job at 06:30 every morning on a Mac.
+     1. Replace /PATH/TO/h20_quality_detection (four places) with the project folder.
+     2. Put alert settings (SMTP_HOST, ALERT_EMAIL_TO, ...) in EnvironmentVariables if you want alerts sent.
+     3. cp com.udaipur-lakes.daily.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.udaipur-lakes.daily.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.udaipur-lakes.daily</string>
+  <key>WorkingDirectory</key><string>/PATH/TO/h20_quality_detection</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/PATH/TO/h20_quality_detection/.venv/bin/python</string>
+    <string>-m</string><string>models.pipeline.daily</string>
+    <string>--notify</string>
+  </array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>30</integer></dict>
+  <key>EnvironmentVariables</key><dict><key>ALERT_MIN_SEVERITY</key><string>medium</string></dict>
+  <key>StandardOutPath</key><string>/PATH/TO/h20_quality_detection/models/pipeline/daily.log</string>
+  <key>StandardErrorPath</key><string>/PATH/TO/h20_quality_detection/models/pipeline/daily.log</string>
+</dict>
+</plist>

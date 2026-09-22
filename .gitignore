@@ -9,3 +9,11 @@ __pycache__/
 models/*/data/
 models/*/artifacts/
 models/pipeline/reports/
+# Real lake data and run logs stay on the machine that collects them
+models/pipeline/inbox/
+models/pipeline/history/
+models/pipeline/*.log
+models/pipeline/inbox_air/
+
+# Vendor documents stay local (third-party material)
+*.docx

@@ -7,9 +7,10 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
+from ..air_quality.estimate import air_status
 from ..algal_bloom.estimate import estimate_daily as estimate_algae
 from ..anomaly_detection.config import INTERVAL, SENSORS
-from ..anomaly_detection.data import load_readings
+from ..anomaly_detection.data import prepare
 from ..anomaly_detection.evaluate import alarm_incidents
 from ..bod_surrogate.cpcb import assess
 from ..bod_surrogate.estimate import estimate_daily
@@ -17,7 +18,10 @@ from ..coliform_nowcast.estimate import estimate_daily as estimate_coliform
 from ..forecasting.data import history_from_frame, load_weather, to_hourly
 from ..forecasting.forecast import make_forecast, with_wqi_class
 from ..wqi.predict import classify
-from .report import SEVERITY, render_text, station_report
+from .ingest import load_mapping, normalise, turbidity_unit
+from .dashboard import air_cards
+from .dashboard import render as render_dashboard
+from .report import SEVERITY, air_report, render_text, station_report
 
 HERE = Path(__file__).parent
 # Report-level settings; each model keeps its own thresholds in its saved bundle.
@@ -52,6 +56,8 @@ def latest_wqi(wqi_bundle: dict, cleaned: pd.DataFrame) -> dict:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--readings", type=Path, required=True, help="recent 10-minute sensor export (two weeks or more)")
+    parser.add_argument("--vendor-mapping", type=Path, help="override the column and unit mapping saved at training")
+    parser.add_argument("--air-readings", type=Path, help="recent air station readings (eight days or more), if there are air stations")
     parser.add_argument("--weather", type=Path, help="hourly weather including forecasts for the coming week")
     parser.add_argument("--models-dir", type=Path, default=HERE / "artifacts", help="output of train_all")
     parser.add_argument("--window-hours", type=int, default=24, help="how far back incidents are reported")
@@ -68,9 +74,14 @@ def main(argv=None):
     )
     if needs_weather and args.weather is None:
         parser.error("these models use weather; pass --weather with forecasts for the coming week")
+    air_model = bundles.get("air_quality")
+    if air_model is not None and args.air_readings is not None and air_model["uses_weather"] and args.weather is None:
+        parser.error("the air model uses weather; pass --weather")
     weather = load_weather(args.weather) if needs_weather else None
 
-    readings, _ = load_readings(args.readings)
+    mapping = load_mapping(args.vendor_mapping) if args.vendor_mapping else manifest.get("vendor_mapping", load_mapping(None))
+    normalised, ingest_report = normalise(pd.read_csv(args.readings, low_memory=False), mapping)
+    readings, _ = prepare(normalised)
     flagged = detector.detect(readings, weather if detector.uses_weather else None)
     now = flagged["timestamp"].max()
     recent = flagged[flagged["timestamp"] > now - pd.Timedelta(hours=args.window_hours)]
@@ -94,6 +105,7 @@ def main(argv=None):
         "alert_probability": forecaster["settings"]["alert_probability"],
         "do_alert_mg_l": forecaster["settings"]["do_alert_mg_l"],
         "stale_hours": STALE_HOURS,
+        "turbidity_unit": turbidity_unit(mapping),
     }
     stations, alerts = {}, []
     for station in sorted(flagged["station_id"].unique()):
@@ -102,6 +114,22 @@ def main(argv=None):
             settings, algae_latest.get(station), coliform_latest.get(station),
         )
         alerts += raised
+    for station, sensors in ingest_report["censored_by_station"].items():
+        for sensor, n in sensors.items():
+            low, high = mapping["sensor_ranges"][sensor]
+            alerts.append({"severity": "low", "station": station, "message": (
+                f"{sensor} sat at the sensor's range limit ({low if low is not None else ''}-{high if high is not None else ''}) "
+                f"on {n} readings in this report's data: the lake went beyond what the sensor can measure")})
+    air_sections, air = {}, None
+    if air_model is not None and args.air_readings is not None:
+        air_weather = pd.read_csv(args.weather) if args.weather else None  # all columns: wind, mixing height, humidity
+        air = air_status(air_model, pd.read_csv(args.air_readings, low_memory=False), air_weather)
+        current = {row["station_id"]: row for _, row in air["current"].iterrows()}
+        for station in sorted(set(current) | set(air["flags"])):
+            days = air["daily"][air["daily"]["station_id"] == station] if len(air["daily"]) else air["daily"]
+            air_sections[station], raised = air_report(station, current.get(station), air["flags"].get(station, {}), days,
+                                                       air_model["settings"])
+            alerts += raised
     report = {
         "generated_at": now.isoformat(timespec="minutes"),
         "window_hours": args.window_hours,
@@ -110,6 +138,7 @@ def main(argv=None):
         "weather_forecast_short": forecast["weather_short"],
         "alerts": sorted(alerts, key=lambda a: SEVERITY.index(a["severity"])),
         "stations": stations,
+        **({"air": air_sections} if air_sections else {}),
     }
 
     out = args.out_dir / now.strftime("%Y-%m-%d_%H%M")
@@ -117,6 +146,11 @@ def main(argv=None):
     (out / "report.json").write_text(json.dumps(report, indent=2, default=str))
     text = render_text(report)
     (out / "report.txt").write_text(text)
+    extra = air_cards(report.get("air", {}), air["hourly"]) if air is not None else ""
+    (out / "dashboard.html").write_text(render_dashboard(report, hourly_fc, forecast["nightly"], settings, extra))
+    if air is not None:
+        air["hourly"].to_csv(out / "air_hourly_forecast.csv", index=False)
+        air["daily"].to_csv(out / "air_daily_forecast.csv", index=False)
     recent.to_csv(out / "sensor_flags.csv", index=False)
     hourly_fc.to_csv(out / "hourly_forecast.csv", index=False)
     forecast["nightly"].to_csv(out / "nightly_forecast.csv", index=False)
@@ -126,7 +160,8 @@ def main(argv=None):
     if len(coliform):
         coliform.to_csv(out / "coliform_nowcasts.csv", index=False)
     print(text)
-    print(f"\nReport and data files written to {out}")
+    print(f"\nReport, dashboard and data files written to {out}")
+    return out
 
 
 if __name__ == "__main__":
