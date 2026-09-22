@@ -59,7 +59,9 @@ def main(argv=None):
     parser.add_argument("--no-weather-fetch", action="store_true", help="use the weather file as it is (e.g. offline)")
     parser.add_argument("--models-dir", type=Path, default=HERE / "artifacts")
     parser.add_argument("--out-dir", type=Path, default=HERE / "reports")
-    parser.add_argument("--days", type=int, default=16, help="days of recent readings each report looks at")
+    parser.add_argument("--days", type=int, default=45,
+                        help="days of recent readings each report looks at; 45 leaves 30 days of already-verified "
+                             "forecasts to keep the forecast ranges calibrated to the season")
     parser.add_argument("--notify", action="store_true", help="send alerts (configured by environment, see notify.py)")
     parser.add_argument("--dry-run-notify", action="store_true", help="print the alert message instead of sending it")
     args = parser.parse_args(argv)

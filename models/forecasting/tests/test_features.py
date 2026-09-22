@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -5,6 +7,7 @@ import pytest
 from models.anomaly_detection.config import SENSORS
 from models.forecasting.config import DEFAULT_SETTINGS, WEATHER
 from models.forecasting.features import Timeline, forecast_error, hourly_rows, nightly_rows
+from models.forecasting.forecast import latest_complete_hour
 
 S = DEFAULT_SETTINGS
 WEATHER_FEATURES_AHEAD = {"cloud_before_target_12h", "rain_before_target_24h", "air_at_target", "air_mean_ahead"}
@@ -79,3 +82,12 @@ def test_forecast_weather_error_grows_with_lead_time():
     rain = np.full(20000, 10.0)
     assert (forecast_error("rain", rain, 72, rng) == 0).mean() > (forecast_error("rain", rain, 1, rng) == 0).mean()
     assert set(WEATHER) == {"air_temperature", "cloud_cover", "rain_mm"}
+
+
+def test_a_forecast_needs_a_recent_hour_with_every_sensor():
+    x = np.ones((100, 4))
+    assert latest_complete_hour(SimpleNamespace(x=x, n=100, station="a")) == 99
+    x[60:, 3] = np.nan  # the oxygen probe died 40 hours ago
+    assert latest_complete_hour(SimpleNamespace(x=x, n=100, station="a")) is None
+    x[:, 3] = np.nan  # never reported at all
+    assert latest_complete_hour(SimpleNamespace(x=x, n=100, station="a")) is None

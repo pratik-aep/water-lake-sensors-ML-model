@@ -23,7 +23,9 @@ Every estimate comes with a range and the chance of crossing each legal limit. E
 ```bash
 # One-off: train on history (about 25 min). Vendor exports go through the mapping below.
 .venv/bin/python -m models.pipeline.train_all --readings lake_history.csv --air-readings air_history.csv \
-    --weather weather.csv --lab lab_results.csv --vendor-mapping models/pipeline/vendor_mapping.json
+    --weather weather.csv --lab lab_results.csv --known-episodes maintenance_log.csv \
+    --vendor-mapping models/pipeline/vendor_mapping.json
+# Pass every path: the defaults point at the synthetic demo data made by `models.pipeline.simulate`.
 
 # Every morning (or scheduled, below):
 .venv/bin/python -m models.pipeline.daily --notify
@@ -32,7 +34,7 @@ Every estimate comes with a range and the chance of crossing each legal limit. E
 The daily job does five things:
 1. Adds every export waiting in `pipeline/inbox/` (lakes) and `pipeline/inbox_air/` (air) to the stored history in `pipeline/history/`.
 2. Refreshes the hourly weather from Open-Meteo: the recent past plus 8 days ahead. It needs no key, and if it's offline the stored weather is used.
-3. Writes `reports/<time>/`:
+3. Looks at the last 45 days of readings (30 of them keep the forecast ranges calibrated to the season) and writes `reports/<time>/`:
    - `report.json` and `report.txt`
    - `dashboard.html`: one self-contained page, with a card per lake and per air station
    - CSVs of every forecast and estimate
@@ -63,6 +65,9 @@ Try it without sending anything: `python -m models.pipeline.notify --report <rep
   - how many readings sat at sensor limits;
   - which models have enough data to train, and what each still needs.
 - **`python -m models.pipeline.weather --start 2024-01-01`** downloads Udaipur's recorded weather history for training.
+- **Air station exports** use these columns: `station_id, timestamp, pm1, pm25, pm10, tsp` (µg/m³) and `o3, no2, co, so2, nox, h2s, co2, voc` (ppm, as the vendor reports them).
+- **Grow into it.** `train_all` trains whatever the data allows and says what it skipped and why. The fault detector comes first (88 days of sensor data). The forecaster, lab-based models and air model follow as their data accumulates. The daily report works with any subset of trained models.
+- **WQI and turbidity.** The WQI rates turbidity in NTU, so it is trained only when turbidity is calibrated to NTU or the lab measures turbidity.
 - **Minimum data to train:**
   - Fault detector: 88 days.
   - Forecaster: 150 days.

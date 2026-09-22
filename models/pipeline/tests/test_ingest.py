@@ -1,3 +1,4 @@
+import argparse
 import json
 
 import numpy as np
@@ -6,6 +7,7 @@ import pytest
 
 from models.pipeline import check_data
 from models.pipeline.ingest import load_mapping, normalise, turbidity_unit
+from models.pipeline.train_all import attempt
 from models.wqi.calculator import do_saturation_mgl
 
 
@@ -80,3 +82,11 @@ def test_readiness_says_what_each_model_still_needs():
     assert not verdict["anomaly detector"][0] and "40 days" in verdict["anomaly detector"][1]
     assert verdict["BOD soft sensor"] == (False, "5 lab samples with sensor data around them; needs 38")
     assert "no 'chlorophyll_a' column" in verdict["algae soft sensor"][1]
+
+
+def test_a_model_without_enough_data_is_skipped_with_the_reason():
+    def too_little():
+        argparse.ArgumentParser(prog="bod").error("only 12 lab samples have sensor data around them; need more")
+
+    assert attempt(too_little) == "only 12 lab samples have sensor data around them; need more"
+    assert attempt(lambda: None) is None

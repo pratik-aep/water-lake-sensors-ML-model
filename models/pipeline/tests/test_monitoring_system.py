@@ -49,8 +49,9 @@ def test_train_everything_then_produce_a_daily_report(tmp_path, monkeypatch, cap
     export = readings.assign(dissolved_oxygen=100 * readings["dissolved_oxygen"] / do_saturation_mgl(readings["temperature"], 0.93))
     export = export.rename(columns=VENDOR_COLUMNS)
     export.to_csv(tmp_path / "readings.csv", index=False)
+    # Turbidity arrives on a % scale with a side-by-side calibration to NTU (here the identity), which the WQI needs.
     mapping = {"columns": {ours: theirs for ours, theirs in VENDOR_COLUMNS.items()},
-               "units": {"dissolved_oxygen": "percent", "turbidity": "percent"}}
+               "units": {"dissolved_oxygen": "percent", "turbidity": "percent"}, "turbidity_percent_to_ntu": [1.0, 0.0]}
     (tmp_path / "mapping.json").write_text(json.dumps(mapping))
     weather.to_csv(tmp_path / "weather.csv", index=False)
     lab.to_csv(tmp_path / "lab.csv", index=False)
@@ -91,7 +92,7 @@ def test_train_everything_then_produce_a_daily_report(tmp_path, monkeypatch, cap
         assert section["now"]["wqi_class"] in {"Excellent", "Good", "Poor", "Very Poor", "Unsuitable"}
         assert section["now"]["cpcb_class"] in {"A", "B", "C", "D", "E", "below E", "unknown"}
         assert 0 < section["outlook_48h"]["lowest_oxygen"]["mg_l"] < 20  # converted to mg/L, not left as %
-        assert section["outlook_48h"]["highest_turbidity"]["unit"] == "%"  # no calibration: the vendor's scale
+        assert section["outlook_48h"]["highest_turbidity"]["unit"] == "NTU"  # calibrated from the vendor's % scale
         assert len(section["nights"]) >= 5
         assert section["algae"]["trophic_class"] in {"oligotrophic", "mesotrophic", "eutrophic", "hypereutrophic"}
         assert section["coliform"]["cpcb_band"] in {"A (<=50)", "B (<=500)", "C (<=5000)", "above C"}
@@ -129,3 +130,22 @@ def test_train_everything_then_produce_a_daily_report(tmp_path, monkeypatch, cap
     # The forecaster was trained with weather, so the daily run must not quietly run without it.
     with pytest.raises(SystemExit):
         run.main(["--readings", str(tmp_path / "recent.csv"), "--models-dir", str(models)])
+
+    # Before any lab data exists only the sensor-based models are trained, and the daily report still works.
+    manifest["models"] = {k: v for k, v in manifest["models"].items() if k in ("anomaly_detection", "forecasting")}
+    (models / "manifest.json").write_text(json.dumps(manifest))
+    out = run.main(["--readings", str(tmp_path / "recent.csv"), "--weather", str(tmp_path / "weather.csv"),
+                    "--models-dir", str(models), "--out-dir", str(tmp_path / "sensors_only")])
+    sensors_only = json.loads((out / "report.json").read_text())
+    assert set(sensors_only["stations"]) == set(stations) and "air" not in sensors_only
+    assert all(s["outlook_48h"] and not s["now"] for s in sensors_only["stations"].values())
+    assert (out / "dashboard.html").exists()
+
+    # With only the fault detector (the first months of a new deployment) the report still covers every lake.
+    manifest["models"] = {"anomaly_detection": manifest["models"]["anomaly_detection"]}
+    (models / "manifest.json").write_text(json.dumps(manifest))
+    out = run.main(["--readings", str(tmp_path / "recent.csv"), "--weather", str(tmp_path / "weather.csv"),
+                    "--models-dir", str(models), "--out-dir", str(tmp_path / "detector_only")])
+    detector_only = json.loads((out / "report.json").read_text())
+    assert set(detector_only["stations"]) == set(stations)
+    assert all(s["sensor_health"] and not s["outlook_48h"] for s in detector_only["stations"].values())

@@ -75,3 +75,10 @@ def test_alert_verification_counts_hits_misses_and_false_alarms():
     assert (alerts["hits"], alerts["misses"], alerts["false_alarms"]) == (1, 1, 1)
     assert alerts["critical_success_index"] == pytest.approx(1 / 3, abs=1e-3)
     assert alerts["brier_score"] == pytest.approx(np.mean([0.01, 0.64, 0.49, 0.0]), abs=1e-4)
+
+
+def test_a_group_with_too_few_verified_forecasts_is_left_as_it_was():
+    groups = np.array(["busy"] * 200 + ["sparse"] * 5)
+    lo, hi = np.full(205, -0.5), np.full(205, 0.5)
+    offsets = fit_offsets(lo, hi, np.random.default_rng(2).normal(0, 1, 205), groups, coverage=0.8)
+    assert set(offsets) == {"busy"}  # five outcomes would set the sparse group's range by luck

@@ -14,10 +14,15 @@ from .forecaster import make_timelines
 HERE = Path(__file__).parent
 
 
-def latest_complete_hour(tl) -> int:
+# A forecast starts from the latest hour with every sensor reading; one older than this would be stale.
+MAX_ORIGIN_AGE_HOURS = 24
+
+
+def latest_complete_hour(tl) -> int | None:
+    """Position of the latest hour with every sensor reading, or None if there is none recent enough."""
     complete = np.flatnonzero(~np.isnan(tl.x).any(axis=1))
-    if not len(complete):
-        raise ValueError(f"no hour with every sensor reading at {tl.station}")
+    if not len(complete) or tl.n - 1 - complete[-1] > MAX_ORIGIN_AGE_HOURS:
+        return None
     return int(complete[-1])
 
 
@@ -46,7 +51,14 @@ def make_forecast(bundle: dict, readings: pd.DataFrame, weather: pd.DataFrame | 
         hourly_model.calibrate(timelines, recent, data_end)
         nightly_model.calibrate(timelines, recent, data_end, hourly_model)
 
-    last = {station: latest_complete_hour(tl) for station, tl in timelines.items()}
+    # A lake whose sensors have not all reported recently (a dead probe, a long gap) gets no forecast today;
+    # the other lakes still do.
+    last = {station: pos for station, tl in timelines.items() if (pos := latest_complete_hour(tl)) is not None}
+    skipped = sorted(set(timelines) - set(last))
+    if not last:
+        return {"hourly": pd.DataFrame(), "nightly": pd.DataFrame(), "issued_at": {}, "recalibrated": recalibrated,
+                "weather_short": False, "skipped": skipped}
+    timelines = {station: timelines[station] for station in last}
     issued_at = {station: tl.clock[last[station]] for station, tl in timelines.items()}
     hourly_fc = hourly_model.predict(timelines, {st: np.array([pos]) for st, pos in last.items()})
 
@@ -70,6 +82,7 @@ def make_forecast(bundle: dict, readings: pd.DataFrame, weather: pd.DataFrame | 
         "issued_at": issued_at,
         "recalibrated": recalibrated,
         "weather_short": weather_short,
+        "skipped": skipped,
     }
 
 

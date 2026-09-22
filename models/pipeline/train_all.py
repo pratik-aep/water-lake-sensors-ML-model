@@ -1,7 +1,9 @@
 """Train every model on one dataset: the anomaly detector first, then the rest on the readings it cleaned."""
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +58,25 @@ def _read_metrics(path: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+def attempt(train) -> str | None:
+    """Run a model's training command; None if it trained, else why it stopped (too little data, a missing column).
+    Models the system can run without are skipped this way instead of stopping the whole run."""
+    errors = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(errors):
+            train()
+    except SystemExit as stop:
+        if stop.code:
+            return (errors.getvalue().strip().splitlines() or [str(stop.code)])[-1].split("error: ")[-1]
+    return None
+
+
+def _dig(value, keys):
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--readings", type=Path, default=HERE / "data" / "sensor_readings.csv", help="10-minute sensor export")
@@ -64,7 +85,8 @@ def main(argv=None):
     parser.add_argument("--weather", type=Path, default=HERE / "data" / "weather.csv", help="hourly weather")
     parser.add_argument("--no-weather", action="store_true")
     parser.add_argument("--lab", type=Path, default=HERE / "data" / "lab_results.csv",
-                        help="lab results: station_id, timestamp, bod, conductivity, nitrate (lab pH/turbidity/DO optional)")
+                        help="lab results (optional): station_id, timestamp, bod, conductivity, nitrate, and optionally "
+                             "chlorophyll_a, total_coliform; without them only the sensor-based models are trained")
     parser.add_argument("--air-readings", type=Path, default=HERE / "data" / "air_readings.csv",
                         help="air station readings (used if the file exists): station_id, timestamp, pm1..tsp, gases in ppm")
     parser.add_argument("--known-episodes", type=Path, default=HERE / "data" / "injected_episodes.csv",
@@ -74,9 +96,8 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path, default=HERE / "artifacts")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
-    for path in (args.readings, args.lab):
-        if not path.exists():
-            parser.error(f"{path} not found; run `python -m models.pipeline.simulate` or pass it explicitly")
+    if not args.readings.exists():
+        parser.error(f"{args.readings} not found; run `python -m models.pipeline.simulate` or pass it explicitly")
 
     out = args.out_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -91,14 +112,28 @@ def main(argv=None):
     use_weather = not args.no_weather and args.weather.exists()
     weather_args = ["--weather", str(args.weather)] if use_weather else ["--no-weather"]
     seed = ["--seed", str(args.seed)]
-
+    has_lab = args.lab.exists()
     # Chlorophyll-a and total coliform are optional in a lab panel; without them their models are simply not trained.
-    lab_columns = pd.read_csv(args.lab, nrows=1).columns
-    has_chlorophyll, has_coliform = CHLOROPHYLL in lab_columns, COLIFORM in lab_columns
-    has_air = args.air_readings.exists()
-    stages = 4 + has_chlorophyll + has_coliform + has_air
+    lab_columns = pd.read_csv(args.lab, nrows=1).columns if has_lab else []
+    planned = ["anomaly_detection", "forecasting"]
+    planned += ["bod_surrogate", "wqi"] if has_lab else []
+    planned += ["algal_bloom"] if CHLOROPHYLL in lab_columns else []
+    planned += ["coliform_nowcast"] if COLIFORM in lab_columns else []
+    planned += ["air_quality"] if args.air_readings.exists() else []
+    skipped = {} if has_lab else {name: "no lab results" for name in ("bod_surrogate", "wqi")}
+    if has_lab and turbidity_unit(mapping) == "%" and "turbidity" not in lab_columns:
+        # The WQI rates turbidity against 5 NTU; on the vendor's uncalibrated % scale that would mislabel every sample.
+        planned.remove("wqi")
+        skipped["wqi"] = ("turbidity is on the vendor's % scale and the lab gives no turbidity (NTU): calibrate the "
+                          "sensor (turbidity_percent_to_ntu) or add lab turbidity")
 
-    print(f"\n===== 1/{stages}  Anomaly detector =====")
+    def stage(name, title):
+        print(f"\n===== {planned.index(name) + 1}/{len(planned)}  {title} =====")
+
+
+    # The core needs only the sensors: sensor checks run from the first months of data, and every other model is
+    # added once there is enough data for it.
+    stage("anomaly_detection", "Anomaly detector")
     known = ["--known-episodes", str(args.known_episodes)] if args.known_episodes.exists() else []
     anomaly_weather = ["--weather", str(args.weather)] if use_weather else []
     anomaly_train.main(["--data", str(args.readings), "--test-days", str(args.test_days), *known, *anomaly_weather,
@@ -111,58 +146,58 @@ def main(argv=None):
     faulty = int(flagged[[f"{s}_fault" for s in SENSORS]].ne("").to_numpy().sum())
     print(f"Flagged {faulty} sensor values as faulty; the other models learn from the rest ({cleaned.name})")
 
-    print(f"\n===== 2/{stages}  Forecaster =====")
-    forecast_train.main(["--data", str(cleaned), *weather_args, "--test-days", str(args.test_days),
-                         "--out-dir", str(out / "forecasting"), *seed, *(["--no-challenger"] if args.no_challenger else [])])
+    trained = ["anomaly_detection"]
 
-    print(f"\n===== 3/{stages}  BOD soft sensor =====")
-    bod_train.main(["--data", str(cleaned), "--lab", str(args.lab), *weather_args, "--out-dir", str(out / "bod_surrogate"), *seed])
-
-    print(f"\n===== 4/{stages}  WQI classifier =====")
-    rows = lab_with_sensors(pd.read_csv(args.lab), to_hourly(history_from_frame(flagged)[0], 3))
+    lab_args = ["--data", str(cleaned), "--lab", str(args.lab), *weather_args]
     wqi_rows = out / "wqi_training_rows.csv"
-    rows.to_csv(wqi_rows, index=False)
-    wqi_train.main(["--data", str(wqi_rows), "--features", "sensor", "--out-dir", str(out / "wqi"), *seed])
-
-    trained = ["anomaly_detection", "forecasting", "bod_surrogate", "wqi"]
-    if has_chlorophyll:
-        print(f"\n===== 5/{stages}  Algae (chlorophyll-a) soft sensor =====")
-        algae_train.main(["--data", str(cleaned), "--lab", str(args.lab), *weather_args, "--out-dir", str(out / "algal_bloom"), *seed])
-        trained.append("algal_bloom")
-    if has_coliform:
-        print(f"\n===== {len(trained) + 1}/{stages}  Total coliform nowcast =====")
-        coliform_train.main(["--data", str(cleaned), "--lab", str(args.lab), *weather_args,
-                             "--out-dir", str(out / "coliform_nowcast"), *seed])
-        trained.append("coliform_nowcast")
-    if has_air:
-        print(f"\n===== {len(trained) + 1}/{stages}  Air quality (AQI and particulate forecasts) =====")
-        air_train.main(["--data", str(args.air_readings), *(["--weather", str(args.weather)] if use_weather else []),
-                        "--test-days", str(args.test_days), "--out-dir", str(out / "air_quality"), *seed])
-        trained.append("air_quality")
+    rows = pd.DataFrame()
+    if has_lab:
+        rows = lab_with_sensors(pd.read_csv(args.lab), to_hourly(history_from_frame(flagged)[0], 3))
+        rows.to_csv(wqi_rows, index=False)
+    jobs = [
+        ("forecasting", "Forecaster", lambda: forecast_train.main(
+            ["--data", str(cleaned), *weather_args, "--test-days", str(args.test_days), "--out-dir", str(out / "forecasting"),
+             *seed, *(["--no-challenger"] if args.no_challenger else [])])),
+        ("bod_surrogate", "BOD soft sensor", lambda: bod_train.main([*lab_args, "--out-dir", str(out / "bod_surrogate"), *seed])),
+        ("wqi", "WQI classifier", lambda: wqi_train.main(["--data", str(wqi_rows), "--features", "sensor", "--out-dir", str(out / "wqi"), *seed])),
+        ("algal_bloom", "Algae (chlorophyll-a) soft sensor", lambda: algae_train.main([*lab_args, "--out-dir", str(out / "algal_bloom"), *seed])),
+        ("coliform_nowcast", "Total coliform nowcast", lambda: coliform_train.main([*lab_args, "--out-dir", str(out / "coliform_nowcast"), *seed])),
+        ("air_quality", "Air quality (AQI and particulate forecasts)", lambda: air_train.main(
+            ["--data", str(args.air_readings), *(["--weather", str(args.weather)] if use_weather else []),
+             "--test-days", str(args.test_days), "--out-dir", str(out / "air_quality"), *seed])),
+    ]
+    for name, title, train in jobs:
+        if name not in planned:
+            continue
+        stage(name, title)
+        reason = attempt(train)
+        if reason is None:
+            trained.append(name)
+        else:
+            skipped[name] = reason
+            print(f"Skipped: {reason}")
 
     metrics = {name: _read_metrics(out / name / MODEL_FILES[name].replace(".joblib", "_metrics.json")) for name in trained}
+    def get(name, *keys):
+        return _dig(metrics.get(name, {}), keys)
+
     summary = {
-        "anomaly_false_alarms_per_station_week": metrics["anomaly_detection"].get("clean_holdout", {}).get("false_alarms_per_station_week"),
-        "forecaster_model": metrics["forecasting"].get("hourly_model"),
-        "forecaster_low_oxygen_alert_csi": metrics["forecasting"].get("nightly_test", {}).get("alerts", {}).get("all", {}).get("critical_success_index"),
-        "bod_model": metrics["bod_surrogate"].get("model"),
-        "bod_test_mae_mg_l": metrics["bod_surrogate"].get("test", {}).get("soft_sensor", {}).get("mae"),
-        "bod_last_lab_value_mae_mg_l": metrics["bod_surrogate"].get("test", {}).get("last_lab_value", {}).get("mae"),
-        "wqi_model": metrics["wqi"].get("model_name"),
-        "wqi_holdout_accuracy": metrics["wqi"].get("holdout_evaluation", {}).get("report", {}).get("accuracy"),
+        "anomaly_false_alarms_per_station_week": get("anomaly_detection", "clean_holdout", "false_alarms_per_station_week"),
+        "forecaster_model": get("forecasting", "hourly_model"),
+        "forecaster_low_oxygen_alert_csi": get("forecasting", "nightly_test", "alerts", "all", "critical_success_index"),
+        "bod_model": get("bod_surrogate", "model"),
+        "bod_test_mae_mg_l": get("bod_surrogate", "test", "soft_sensor", "mae"),
+        "bod_last_lab_value_mae_mg_l": get("bod_surrogate", "test", "last_lab_value", "mae"),
+        "wqi_model": get("wqi", "model_name"),
+        "wqi_holdout_accuracy": get("wqi", "holdout_evaluation", "report", "accuracy"),
+        "chlorophyll_test_mae_ug_l": get("algal_bloom", "test", "soft_sensor", "mae"),
+        "chlorophyll_trophic_class_agreement": get("algal_bloom", "test", "trophic_class_agreement_with_lab"),
+        "coliform_model": get("coliform_nowcast", "model"),
+        "coliform_cpcb_band_agreement": get("coliform_nowcast", "test", "cpcb_band_agreement_with_lab"),
+        "air_tomorrow_pm25_mae_ug_m3": get("air_quality", "daily_test", "1", "pm25", "mae"),
+        "air_tomorrow_category_agreement": get("air_quality", "daily_test", "1", "category_agreement"),
     }
-    if has_chlorophyll:
-        algae = metrics["algal_bloom"]
-        summary["chlorophyll_test_mae_ug_l"] = algae.get("test", {}).get("soft_sensor", {}).get("mae")
-        summary["chlorophyll_trophic_class_agreement"] = algae.get("test", {}).get("trophic_class_agreement_with_lab")
-    if has_coliform:
-        coliform = metrics["coliform_nowcast"]
-        summary["coliform_model"] = coliform.get("model")
-        summary["coliform_cpcb_band_agreement"] = coliform.get("test", {}).get("cpcb_band_agreement_with_lab")
-    if has_air:
-        tomorrow = metrics["air_quality"].get("daily_test", {}).get("1", {})
-        summary["air_tomorrow_pm25_mae_ug_m3"] = tomorrow.get("pm25", {}).get("mae")
-        summary["air_tomorrow_category_agreement"] = tomorrow.get("category_agreement")
+    summary = {k: v for k, v in summary.items() if v is not None}
     manifest = {
         "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "readings": str(source),
@@ -171,17 +206,20 @@ def main(argv=None):
         "vendor_mapping": mapping,
         "turbidity_unit": turbidity_unit(mapping),
         "weather": str(args.weather) if use_weather else None,
-        "lab": str(args.lab),
-        "lab_sha256": _sha256(args.lab),
+        "lab": str(args.lab) if has_lab else None,
+        "lab_sha256": _sha256(args.lab) if has_lab else None,
         "models": {name: f"{name}/{MODEL_FILES[name]}" for name in trained},
+        "skipped": skipped,
         "sensor_values_flagged_faulty": faulty,
         "wqi_training_rows": len(rows),
         "summary": summary,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
-    print("\n===== All models trained =====")
+    print(f"\n===== Trained {len(trained)} model{'' if len(trained) == 1 else 's'} =====")
     for key, value in summary.items():
         print(f"  {key:<40} {value}")
+    for name, reason in skipped.items():
+        print(f"  not trained: {name:<27} {reason}")
     print(f"Manifest: {out / 'manifest.json'}")
 
 

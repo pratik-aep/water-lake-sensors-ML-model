@@ -15,6 +15,7 @@ from ..anomaly_detection.evaluate import alarm_incidents
 from ..bod_surrogate.cpcb import assess
 from ..bod_surrogate.estimate import estimate_daily
 from ..coliform_nowcast.estimate import estimate_daily as estimate_coliform
+from ..forecasting.config import DEFAULT_SETTINGS as FORECAST_SETTINGS
 from ..forecasting.data import history_from_frame, load_weather, to_hourly
 from ..forecasting.forecast import make_forecast, with_wqi_class
 from ..wqi.predict import classify
@@ -66,7 +67,8 @@ def main(argv=None):
 
     manifest = json.loads((args.models_dir / "manifest.json").read_text())
     bundles = {name: joblib.load(args.models_dir / path) for name, path in manifest["models"].items()}
-    forecaster, bod_model = bundles["forecasting"], bundles["bod_surrogate"]
+    # The fault detector always exists; the forecaster and lab-based models once there was enough data to train them.
+    forecaster, bod_model, wqi_model = bundles.get("forecasting"), bundles.get("bod_surrogate"), bundles.get("wqi")
     algae_model, coliform_model = bundles.get("algal_bloom"), bundles.get("coliform_nowcast")
     detector = bundles["anomaly_detection"]["detector"]
     needs_weather = detector.uses_weather or any(
@@ -89,9 +91,12 @@ def main(argv=None):
     incidents = alarm_incidents(recent, merge_gap)
 
     cleaned, _ = history_from_frame(flagged)
-    forecast = make_forecast(forecaster, cleaned, weather)
-    hourly_fc = with_wqi_class(forecast["hourly"], bundles["wqi"])
-    bod, _ = estimate_daily(bod_model, cleaned, weather)
+    forecast = make_forecast(forecaster, cleaned, weather) if forecaster is not None else {
+        "hourly": pd.DataFrame(), "nightly": pd.DataFrame(), "recalibrated": False, "weather_short": False, "skipped": []}
+    hourly_fc = forecast["hourly"]
+    if wqi_model is not None and len(hourly_fc):
+        hourly_fc = with_wqi_class(hourly_fc, wqi_model)
+    bod = estimate_daily(bod_model, cleaned, weather)[0] if bod_model is not None else pd.DataFrame()
     coliform = estimate_coliform(coliform_model, cleaned, weather)[0] if coliform_model is not None else pd.DataFrame()
     coliform_latest = {st: g.iloc[-1] for st, g in coliform.groupby("station_id")} if len(coliform) else {}
     if len(bod) and len(coliform):
@@ -99,11 +104,12 @@ def main(argv=None):
     bod_latest = {st: g.iloc[-1] for st, g in bod.groupby("station_id")} if len(bod) else {}
     algae = estimate_algae(algae_model, cleaned, weather)[0] if algae_model is not None else pd.DataFrame()
     algae_latest = {st: g.iloc[-1] for st, g in algae.groupby("station_id")} if len(algae) else {}
-    wqi_now = latest_wqi(bundles["wqi"], cleaned)
+    wqi_now = latest_wqi(wqi_model, cleaned) if wqi_model is not None else {}
 
+    forecast_settings = forecaster["settings"] if forecaster is not None else FORECAST_SETTINGS
     settings = {
-        "alert_probability": forecaster["settings"]["alert_probability"],
-        "do_alert_mg_l": forecaster["settings"]["do_alert_mg_l"],
+        "alert_probability": forecast_settings["alert_probability"],
+        "do_alert_mg_l": forecast_settings["do_alert_mg_l"],
         "stale_hours": STALE_HOURS,
         "turbidity_unit": turbidity_unit(mapping),
     }
@@ -114,12 +120,18 @@ def main(argv=None):
             settings, algae_latest.get(station), coliform_latest.get(station),
         )
         alerts += raised
+    notes = [(st, "medium", "No forecast today: not every sensor has reported in the last 24 hours") for st in forecast["skipped"]]
     for station, sensors in ingest_report["censored_by_station"].items():
         for sensor, n in sensors.items():
             low, high = mapping["sensor_ranges"][sensor]
-            alerts.append({"severity": "low", "station": station, "message": (
-                f"{sensor} sat at the sensor's range limit ({low if low is not None else ''}-{high if high is not None else ''}) "
-                f"on {n} readings in this report's data: the lake went beyond what the sensor can measure")})
+            span = f"{'' if low is None else low}-{'' if high is None else high}"
+            notes.append((station, "low", f"{sensor} sat at the sensor's range limit ({span}) on {n} readings in this "
+                                          "report's data: the lake went beyond what the sensor can measure"))
+    for station, severity, message in notes:
+        note = {"severity": severity, "station": station, "message": message}
+        alerts.append(note)
+        if station in stations:
+            stations[station]["alerts"].append(note)
     air_sections, air = {}, None
     if air_model is not None and args.air_readings is not None:
         air_weather = pd.read_csv(args.weather) if args.weather else None  # all columns: wind, mixing height, humidity
@@ -152,9 +164,11 @@ def main(argv=None):
         air["hourly"].to_csv(out / "air_hourly_forecast.csv", index=False)
         air["daily"].to_csv(out / "air_daily_forecast.csv", index=False)
     recent.to_csv(out / "sensor_flags.csv", index=False)
-    hourly_fc.to_csv(out / "hourly_forecast.csv", index=False)
-    forecast["nightly"].to_csv(out / "nightly_forecast.csv", index=False)
-    bod.to_csv(out / "bod_estimates.csv", index=False)
+    if len(hourly_fc):
+        hourly_fc.to_csv(out / "hourly_forecast.csv", index=False)
+        forecast["nightly"].to_csv(out / "nightly_forecast.csv", index=False)
+    if len(bod):
+        bod.to_csv(out / "bod_estimates.csv", index=False)
     if len(algae):
         algae.to_csv(out / "algae_estimates.csv", index=False)
     if len(coliform):

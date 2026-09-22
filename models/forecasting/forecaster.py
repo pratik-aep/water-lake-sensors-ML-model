@@ -91,7 +91,6 @@ class HourlyForecaster:
         info, deltas, now, actual, _ = self.working_forecast(timelines, self.origins(timelines, start, end), True)
         buckets = horizon_bucket(info["horizon"].to_numpy(), self.settings["horizon_buckets"])
         coverage = self.settings["quantiles"][-1] - self.settings["quantiles"][0]
-        self.offsets_ = {}
         for k, s in enumerate(SENSORS):
             found = fit_offsets(now[:, k] + deltas[s][:, 0], now[:, k] + deltas[s][:, 2], actual[:, k], buckets, coverage)
             self.offsets_.update({f"{s}|{b}": q for b, q in found.items()})
@@ -188,7 +187,7 @@ class NightlyForecaster:
         info, lo, _, hi, actual, _, _ = self._working(timelines, self.issue_dates(timelines, start, end), True, hourly)
         coverage = self.settings["quantiles"][-1] - self.settings["quantiles"][0]
         found = fit_offsets(lo, hi, actual, info["days_ahead"].astype(str).to_numpy(), coverage)
-        self.offsets_ = {str(k): v for k, v in found.items()}
+        self.offsets_.update({str(k): v for k, v in found.items()})
         return self
 
     def predict(self, timelines: dict, issue: dict, simulated_forecast: bool = False, hourly=None) -> pd.DataFrame:

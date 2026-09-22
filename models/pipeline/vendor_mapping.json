@@ -14,5 +14,6 @@
   "turbidity_percent_to_ntu": null,
   "sensor_ranges": {"temperature": [-20, 70], "ph": [4, 9], "dissolved_oxygen": [null, 100]},
   "pressure_atm": 0.93,
+  "_timezone": "Leave null if the export's timestamps are Udaipur local time. If they are UTC or carry an offset, set \"Asia/Kolkata\" and they are converted to local time.",
   "timezone": null
 }

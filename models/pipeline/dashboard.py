@@ -105,13 +105,14 @@ def _lake_card(station: str, s: dict, hourly: pd.DataFrame, nightly: pd.DataFram
         c = s["coliform"]
         estimates.append(("Total coliform", f'{_fmt(c["total_coliform_mpn_100ml"], 0)} MPN/100 mL <span class="badge">band {escape(c["cpcb_band"])}</span>'))
 
-    oxygen = hourly[(hourly["station_id"] == station) & (hourly["sensor"] == "dissolved_oxygen")].sort_values("target_time")
-    nights = nightly[nightly["station_id"] == station].sort_values("night_of")
+    oxygen = hourly[(hourly["station_id"] == station) & (hourly["sensor"] == "dissolved_oxygen")].sort_values("target_time") if len(hourly) else hourly
+    nights = nightly[nightly["station_id"] == station].sort_values("night_of") if len(nightly) else nightly
     alert_level = settings["do_alert_mg_l"]
     html = [f'<section class="card"><div class="head"><h2>{escape(station.replace("_", " ").title())}</h2>'
             f'<span class="badge">{len(s["alerts"])} alert(s)</span></div>',
             "<h3>Now</h3><dl>" + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows) + "</dl>",
-            "<h3>Estimated from the sensors</h3><dl>" + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in estimates) + "</dl>"]
+            "<h3>Estimated from the sensors</h3><dl>" + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in estimates) + "</dl>"
+            if now or s.get("algae") or s.get("coliform") else ""]
     if len(oxygen):
         html.append("<h3>Oxygen, next 48 h (mg/L, 80% range)</h3>")
         html.append(band_chart(oxygen["target_time"], oxygen["lo"], oxygen["mid"], oxygen["hi"], alert_level))

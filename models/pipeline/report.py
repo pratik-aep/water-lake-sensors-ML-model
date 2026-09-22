@@ -100,7 +100,7 @@ def station_report(station, flagged, incidents, forecast_hourly, nightly, bod, w
             alert("medium", f"Total coliform likely above 500 MPN/100 mL ({coliform['total_coliform']:.0f}), "
                             "the CPCB bathing (Class B) limit")
 
-    fc = forecast_hourly[forecast_hourly["station_id"] == station]
+    fc = forecast_hourly[forecast_hourly["station_id"] == station] if len(forecast_hourly) else forecast_hourly
     outlook = {}
     if len(fc):
         oxygen = fc[fc["sensor"] == "dissolved_oxygen"]
@@ -117,7 +117,7 @@ def station_report(station, flagged, incidents, forecast_hourly, nightly, bod, w
     section["outlook_48h"] = outlook
 
     section["nights"] = []
-    for n in nightly[nightly["station_id"] == station].itertuples(index=False):
+    for n in (nightly[nightly["station_id"] == station] if len(nightly) else nightly).itertuples(index=False):
         flagged_night = n.p_below_alert >= settings["alert_probability"]
         section["nights"].append({
             "date": str(pd.Timestamp(n.night_of).date()),

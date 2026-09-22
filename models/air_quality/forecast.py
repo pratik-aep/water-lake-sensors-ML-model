@@ -27,7 +27,8 @@ def _noisy(name: str, values, lead_hours, rng):
 class AirTimeline:
     """One station's hourly log particle levels with weather on the same clock, running into the future."""
 
-    def __init__(self, station: str, hourly: pd.DataFrame, weather: pd.DataFrame | None, targets, future_hours: int):
+    def __init__(self, station: str, hourly: pd.DataFrame, weather: pd.DataFrame | None, targets, future_hours: int,
+                 weather_columns=None):
         g = hourly.set_index("timestamp").sort_index().asfreq("h")
         self.station, self.start, self.n = station, g.index[0], len(g)
         self.clock = pd.date_range(self.start, periods=self.n + future_hours, freq="h")
@@ -36,11 +37,17 @@ class AirTimeline:
         level = pd.DataFrame(np.expm1(self.y), index=g.index)
         self.day_mean = np.log1p(level.rolling(24, min_periods=16).mean().to_numpy())
         self.week_mean = np.log1p(level.rolling(24 * 7, min_periods=24 * 3).mean().to_numpy())
-        self.weather_columns = [c for c in AHEAD if weather is not None and c in weather]
+        # A trained model passes the columns it learned from; one missing from today's weather becomes unknown (NaN),
+        # which the trees handle, rather than a different set of inputs.
+        self.weather_columns = list(weather_columns) if weather_columns is not None else [
+            c for c in AHEAD if weather is not None and c in weather]
         self.w = None
-        if self.weather_columns:
+        if self.weather_columns and weather is not None:
             w = weather.assign(timestamp=pd.to_datetime(weather["timestamp"])).drop_duplicates("timestamp")
-            self.w = w.set_index("timestamp").reindex(self.clock)[self.weather_columns].to_numpy(dtype=float)
+            w = w.set_index("timestamp").reindex(self.clock).reindex(columns=self.weather_columns)
+            self.w = w.to_numpy(dtype=float)
+        elif self.weather_columns:
+            self.w = np.full((len(self.clock), len(self.weather_columns)), np.nan)
 
     def position(self, when) -> int:
         return int((pd.Timestamp(when) - self.start) // pd.Timedelta(hours=1))
@@ -122,7 +129,6 @@ class HourlyForecaster:
         info, deltas, now, actual = self._working(timelines, self.origins(timelines, start, end, self.settings["eval_origin_every_hours"]), rng)
         buckets = horizon_bucket(info["horizon"].to_numpy(), self.settings["horizon_buckets"])
         coverage = self.settings["quantiles"][-1] - self.settings["quantiles"][0]
-        self.offsets_ = {}
         for k, t in enumerate(self.settings["targets"]):
             found = fit_offsets(now[:, k] + deltas[t][:, 0], now[:, k] + deltas[t][:, 2], actual[:, k], buckets, coverage)
             self.offsets_.update({f"{t}|{b}": q for b, q in found.items()})
@@ -243,7 +249,6 @@ class DailyForecaster:
         info, quantiles, _, actual = self._working(timelines, self.issue_dates(timelines, start, end), rng, hourly)
         coverage = self.settings["quantiles"][-1] - self.settings["quantiles"][0]
         groups = info["days_ahead"].astype(str).to_numpy()
-        self.offsets_ = {}
         for k, t in enumerate(self.settings["targets"]):
             found = fit_offsets(quantiles[t][:, 0], quantiles[t][:, 2], actual[:, k], groups, coverage)
             self.offsets_.update({f"{t}|{g}": q for g, q in found.items()})

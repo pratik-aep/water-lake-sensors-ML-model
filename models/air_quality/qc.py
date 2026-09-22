@@ -66,8 +66,8 @@ def check(hourly: pd.DataFrame, weather: pd.DataFrame | None, settings: dict) ->
 
     particles = [p for p in PARTICLES if p in out]
     if weather is not None and "relative_humidity" in weather:
-        humidity = out["timestamp"].map(pd.to_datetime(weather["timestamp"]).pipe(
-            lambda t: pd.Series(weather["relative_humidity"].to_numpy(), index=t))).astype(float)
+        rh = weather.assign(timestamp=pd.to_datetime(weather["timestamp"])).drop_duplicates("timestamp", keep="last")
+        humidity = out["timestamp"].map(rh.set_index("timestamp")["relative_humidity"]).astype(float)
         growth = pd.Series(humidity_growth(humidity, settings["hygroscopic_kappa"]), index=out.index)
         foggy = humidity > settings["humidity_trust_limit"]
         for p in particles:

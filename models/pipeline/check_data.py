@@ -38,7 +38,7 @@ def covered_samples(lab: pd.DataFrame, hourly: pd.DataFrame) -> int:
 
 
 def readiness(readings: pd.DataFrame, lab: pd.DataFrame | None, weather: pd.DataFrame | None,
-              air: pd.DataFrame | None = None) -> tuple[dict, list]:
+              air: pd.DataFrame | None = None, turbidity: str = "NTU") -> tuple[dict, list]:
     """Per station coverage, plus one (model, ready, reason) row per model."""
     days = (readings.groupby("station_id")["timestamp"].agg(lambda t: (t.max() - t.min()) / pd.Timedelta(days=1)))
     coverage = readings.groupby("station_id")[SENSORS].agg(lambda v: round(float(v.notna().mean()), 3))
@@ -73,8 +73,11 @@ def readiness(readings: pd.DataFrame, lab: pd.DataFrame | None, weather: pd.Data
         if weather is not None and not {"wind_speed", "boundary_layer_height"} <= set(weather.columns):
             rows.append(("air weather", False, "weather lacks wind_speed and boundary_layer_height; fetch it with models.pipeline.weather"))
     wqi_ready = lab is not None and {"bod", "conductivity", "nitrate"} <= set(lab.columns)
-    rows.append(("WQI classifier", wqi_ready and len(lab) >= 50,
-                 "needs lab bod, conductivity and nitrate on 50+ samples" if not wqi_ready else f"{len(lab)} lab samples; needs 50"))
+    if wqi_ready and turbidity == "%" and "turbidity" not in lab.columns:
+        rows.append(("WQI classifier", False, "turbidity is on the vendor's % scale: calibrate it to NTU or add lab turbidity"))
+    else:
+        rows.append(("WQI classifier", wqi_ready and len(lab) >= 50,
+                     "needs lab bod, conductivity and nitrate on 50+ samples" if not wqi_ready else f"{len(lab)} lab samples; needs 50"))
     return stations, rows
 
 
@@ -93,7 +96,7 @@ def main(argv=None):
     lab = pd.read_csv(args.lab) if args.lab else None
     weather = pd.read_csv(args.weather) if args.weather else None
     air = pd.read_csv(args.air_readings, low_memory=False) if args.air_readings else None
-    stations, rows = readiness(readings, lab, weather, air)
+    stations, rows = readiness(readings, lab, weather, air, turbidity_unit(mapping))
 
     print(f"Readings: {grid['rows_in']} rows, {len(stations)} stations, {grid['date_range'][0]} to {grid['date_range'][1]}")
     print(f"Turbidity is in {turbidity_unit(mapping)}; oxygen in mg/L after import")

@@ -29,9 +29,9 @@ def load(readings_path, weather_path, settings):
     return check(to_hourly(readings, settings), weather, settings), weather
 
 
-def timelines_for(hourly: pd.DataFrame, weather, settings) -> dict:
+def timelines_for(hourly: pd.DataFrame, weather, settings, weather_columns=None) -> dict:
     ahead = max(max(settings["horizons"]), 24 * (max(settings["days_ahead"]) + 1))
-    return {st: AirTimeline(st, g[["timestamp", *settings["targets"]]], weather, settings["targets"], ahead)
+    return {st: AirTimeline(st, g[["timestamp", *settings["targets"]]], weather, settings["targets"], ahead, weather_columns)
             for st, g in hourly.groupby("station_id", sort=True)}
 
 

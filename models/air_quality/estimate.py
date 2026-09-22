@@ -31,12 +31,13 @@ def air_status(bundle: dict, readings: pd.DataFrame, weather: pd.DataFrame | Non
         for st, g in last_day.groupby("station_id")
     }
 
-    timelines = timelines_for(hourly, weather if bundle["uses_weather"] else None, s)
+    timelines = timelines_for(hourly, weather if bundle["uses_weather"] else None, s, bundle["weather_columns"])
     hourly_model, daily_model = bundle["hourly"], bundle["daily"]
     origins, issue = {}, {}
     for st, tl in timelines.items():
         complete = np.flatnonzero(~np.isnan(tl.y).any(axis=1))
-        if len(complete) and complete[-1] >= 24 * 7:
+        # A week of history behind the latest complete hour, and that hour no more than a day old.
+        if len(complete) and complete[-1] >= 24 * 7 and tl.n - 1 - complete[-1] <= 24:
             origins[st] = complete[-1:]
             now = tl.clock[complete[-1]]
             evening = now.normalize() + pd.Timedelta(hours=18)
@@ -44,8 +45,9 @@ def air_status(bundle: dict, readings: pd.DataFrame, weather: pd.DataFrame | Non
     hourly_fc = hourly_model.predict(timelines, origins) if origins else pd.DataFrame()
     daily_fc = daily_model.predict(timelines, issue, hourly=hourly_model) if issue else pd.DataFrame()
     if len(daily_fc):
+        # From today on: a morning run still has most of today ahead of it.
         latest = hourly.groupby("station_id")["timestamp"].max().dt.normalize()
-        daily_fc = daily_fc[daily_fc["date"] > daily_fc["station_id"].map(latest)]
+        daily_fc = daily_fc[daily_fc["date"] >= daily_fc["station_id"].map(latest)]
     return {"current": current, "flags": flags, "hourly": hourly_fc, "daily": daily_fc}
 
 
