@@ -1,0 +1,11 @@
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# Generated: rebuild with each model's simulate / train commands (see models/README.md)
+models/*/data/
+models/*/artifacts/
+models/pipeline/reports/
